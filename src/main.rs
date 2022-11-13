@@ -25,6 +25,8 @@ const DEFAULT_PATH: &str = ".local/dht-data.json";
 const DEFAULT_PORT: &str = "8888";
 
 fn main() -> Result<(), Box<dyn std::error::Error>>  {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+
     let mut args = env::args();
     let sensor_url = args.nth(1).expect("No Sensor URL provided");
 
@@ -41,12 +43,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
     //* SERVER ADDRESS
     let server_port = args.nth(3).unwrap_or(DEFAULT_PORT.to_string());
     let socket_addr = "0.0.0.0:".to_string() + &server_port;
-    print!("Starting server at: {socket_addr} ");
+    print!("Starting server v{VERSION} at: {socket_addr} ");
     std::io::stdout().flush().ok();
 
     let acc: Arc<Mutex<Vec<Record<SensorResponse>>>> = Arc::new(Mutex::new(records));
     let acc_write = acc.clone();
     let ten_min = Duration::from_secs(600); // 600 = 10min
+    let one_min = Duration::from_secs(60);
 
     let (tx, rx) = channel();
 
@@ -77,11 +80,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
     thread::spawn(move ||  {
         loop {
             let resp = blocking::get(&sensor_url);
-            if let Ok(res) = resp {
-                let val: SensorResponse = res.json().unwrap();
-    
-                tx.send(val).unwrap();
-                sleep(ten_min);
+            match resp {
+                Ok(res) => {
+                    let val: SensorResponse = res.json().unwrap();
+        
+                    tx.send(val).unwrap();
+                    sleep(ten_min);
+                },
+                Err(err) => {
+                    let safe_err = err.without_url();
+                    eprintln!("Failed to get sensor: {safe_err}");
+                    sleep(one_min);
+                }
             }
         }
     });
