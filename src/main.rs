@@ -2,6 +2,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::thread::sleep;
+
+#[cfg(feature = "pm2logs")]
+use std::fs::File;
+#[cfg(feature = "pm2logs")]
+use rouille::Response;
+
 use chrono::Utc;
 use reqwest::blocking;
 use rouille::{router, Server as RouilleServer};
@@ -24,14 +30,17 @@ use crate::file_records::save_records;
 const DEFAULT_PATH: &str = ".local/dht-data.json";
 const DEFAULT_PORT: &str = "8888";
 
+#[cfg(feature = "pm2logs")]
+const PM2_LOG_PORT: &str = "/root/.pm2/logs/DHT-DATA-error.log";
+
 fn main() -> Result<(), Box<dyn std::error::Error>>  {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    let mut args = env::args();
-    let sensor_url = args.nth(1).expect("No Sensor URL provided");
+    let args: Vec<String> = env::args().collect();
+    let sensor_url = args.get(1).map(|u| u.to_string()).expect("No Sensor URL provided");
 
     //* RECORDS
-    let path = args.nth(2)
+    let path = args.get(2)
     .map(|p| PathBuf::from(p))
     .unwrap_or_else(|| {
         let mut path = home_dir().unwrap();
@@ -39,17 +48,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
         path
     });
     let records = load_records(&path);
+    println!("Saving records to '{}'", path.to_str().unwrap());
     
     //* SERVER ADDRESS
-    let server_port = args.nth(3).unwrap_or(DEFAULT_PORT.to_string());
-    let socket_addr = "0.0.0.0:".to_string() + &server_port;
-    print!("Starting server v{VERSION} at: {socket_addr} ");
+    let server_port = args.get(3).map(|s| s.as_str()).unwrap_or(DEFAULT_PORT);
+    let socket_addr = "0.0.0.0:".to_string() + server_port;
+    print!("Starting server v{VERSION} at: '{socket_addr}' ");
     std::io::stdout().flush().ok();
 
     let acc: Arc<Mutex<Vec<Record<SensorResponse>>>> = Arc::new(Mutex::new(records));
     let acc_write = acc.clone();
     let ten_min = Duration::from_secs(600); // 600 = 10min
-    let one_min = Duration::from_secs(60);
 
     let (tx, rx) = channel();
 
@@ -79,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
 
     thread::spawn(move ||  {
         loop {
-            let resp = blocking::get(&sensor_url);
+            let resp = blocking::get(sensor_url.clone());
             match resp {
                 Ok(res) => {
                     let val: SensorResponse = res.json().unwrap();
@@ -90,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
                 Err(err) => {
                     let safe_err = err.without_url();
                     eprintln!("Failed to get sensor: {safe_err}");
-                    sleep(one_min);
+                    sleep(ten_min);
                 }
             }
         }
@@ -110,6 +119,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
                 }
                 
                 rouille::Response::json(&vec)
+            },
+            (GET) (/logs) => {
+                #[cfg(feature = "pm2logs")]
+                {
+                    File::open(PM2_LOG_PORT)
+                    .map(|file| Response::from_file("text/plain", file))
+                    .unwrap_or_else(|_| rouille::Response::empty_404())
+                }
+                #[cfg(not(feature = "pm2logs"))]
+                rouille::Response::empty_404()
+            },
+            (GET) (/last) => {
+                let mut vec = acc.lock().unwrap().clone().iter().map(|e| RecordEntry::from(e)).collect::<Vec<RecordEntry>>();
+                vec.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                rouille::Response::json(&vec.last().unwrap())
             },
             _ => rouille::Response::empty_404()
         )
