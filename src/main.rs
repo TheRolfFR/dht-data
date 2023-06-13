@@ -7,8 +7,6 @@ use std::thread::sleep;
 
 #[cfg(feature = "pm2logs")]
 use std::fs::File;
-#[cfg(feature = "pm2logs")]
-use rouille::Response;
 
 use chrono::Utc;
 #[cfg(feature = "cron_get")]
