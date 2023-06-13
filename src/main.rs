@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(feature = "cron_get")]
 use std::time::Duration;
+#[cfg(feature = "cron_get")]
 use std::thread::sleep;
 
 #[cfg(feature = "pm2logs")]
@@ -9,12 +11,14 @@ use std::fs::File;
 use rouille::Response;
 
 use chrono::Utc;
+#[cfg(feature = "cron_get")]
 use reqwest::blocking;
-use rouille::{router, Server as RouilleServer};
+use rouille::input::json_input;
+use rouille::{router, Server as RouilleServer, try_or_400, ResponseBody, Response};
 use dirs::home_dir;
 
 use std::thread;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::sync_channel as channel;
 use std::sync::{Arc, Mutex};
 use std::convert::From;
 
@@ -25,10 +29,14 @@ mod file_records;
 use file_records::load_records;
 use std::env;
 
+mod utils;
+use utils::first_and_last_character;
+
 use crate::file_records::save_records;
 
 const DEFAULT_PATH: &str = ".local/dht-data.json";
 const DEFAULT_PORT: &str = "8888";
+const DEFAULT_PASSWORD: &str = "password";
 
 #[cfg(feature = "pm2logs")]
 const PM2_LOG_PORT: &str = "/root/.pm2/logs/DHT-DATA-error.log";
@@ -37,6 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
 
     let args: Vec<String> = env::args().collect();
+
+    #[cfg(feature = "cron_get")]
     let sensor_url = args.get(1).map(|u| u.to_string()).expect("No Sensor URL provided");
 
     //* RECORDS
@@ -56,11 +66,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
     print!("Starting server v{VERSION} at: '{socket_addr}' ");
     std::io::stdout().flush().ok();
 
+    //* SERVER PASSWORD
+    let server_password = args.get(4).map(|s| s.as_str()).unwrap_or(DEFAULT_PASSWORD).to_string();
+    if server_password == DEFAULT_PASSWORD {
+        print!("Starting server with default password {DEFAULT_PASSWORD}");
+    } else {
+        let hidden = first_and_last_character(server_password.as_str());
+        print!("Starting server with default password {hidden} ");
+    }
+    std::io::stdout().flush().ok();
+
     let acc: Arc<Mutex<Vec<Record<SensorResponse>>>> = Arc::new(Mutex::new(records));
     let acc_write = acc.clone();
-    let ten_min = Duration::from_secs(600); // 600 = 10min
 
-    let (tx, rx) = channel();
+    let (tx, rx) = channel(2);
+    let tx_clone = tx.clone();
 
     thread::spawn(move || {
         let max: usize = 144;
@@ -86,24 +106,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
         }
     });
 
-    thread::spawn(move ||  {
-        loop {
-            let resp = blocking::get(sensor_url.clone());
-            match resp {
-                Ok(res) => {
-                    let val: SensorResponse = res.json().unwrap();
-        
-                    tx.send(val).unwrap();
-                    sleep(ten_min);
-                },
-                Err(err) => {
-                    let safe_err = err.without_url();
-                    eprintln!("Failed to get sensor: {safe_err}");
-                    sleep(ten_min);
+    #[cfg(feature = "cron_get")]
+    {
+        let ten_min = Duration::from_secs(600); // 600 = 10min
+        thread::spawn(move ||  {
+            loop {
+                let resp = blocking::get(sensor_url.clone());
+                match resp {
+                    Ok(res) => {
+                        let val: SensorResponse = res.json().unwrap();
+            
+                        tx.send(val).unwrap();
+                        sleep(ten_min);
+                    },
+                    Err(err) => {
+                        let safe_err = err.without_url();
+                        eprintln!("Failed to get sensor: {safe_err}");
+                        sleep(ten_min);
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
     RouilleServer::new(socket_addr, move |request| {
         router!(request,
@@ -134,6 +158,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>>  {
                 let mut vec = acc.lock().unwrap().clone().iter().map(|e| RecordEntry::from(e)).collect::<Vec<RecordEntry>>();
                 vec.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
                 rouille::Response::json(&vec.last().unwrap())
+            },
+            (POST) (/new) => {
+                let data: SensorPayload = try_or_400!(json_input(request));
+
+                if data.password != server_password {
+                    Response {
+                        status_code: 403,
+                        headers: vec![],
+                        data: ResponseBody::empty(),
+                        upgrade: None,
+                    }
+                } else {
+                    let temperature = data.temperature;
+                    let humidity = data.humidity;
+                    let val = SensorResponse::new(temperature, humidity);
+
+                    tx_clone.send(val).unwrap();
+
+                    Response {
+                        status_code: 201,
+                        headers: vec![],
+                        data: ResponseBody::empty(),
+                        upgrade: None,
+                    }
+                }
             },
             _ => rouille::Response::empty_404()
         )

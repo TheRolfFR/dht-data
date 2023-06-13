@@ -19,6 +19,13 @@ pub struct SensorResponse {
     pub dht11: DHT11
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SensorPayload {
+    pub temperature: f32,
+    pub humidity: f32,
+    pub password: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RecordEntry {
     pub temperature: f32,
@@ -43,4 +50,17 @@ pub struct Record<T> {
     pub value: T,
     #[serde(with = "ts_seconds")]
     pub date: DateTime<Utc>
+}
+
+impl SensorResponse {
+    pub fn new(temperature: f32, humidity: f32) -> Self {
+        SensorResponse {
+            temperature,
+            humidity,
+            temp: 0f32, dht11: DHT11 {
+                temp: 0f32,
+                humi: 0f32
+            }
+        }
+    }
 }
